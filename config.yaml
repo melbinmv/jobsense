@@ -1,0 +1,21 @@
+ingestion:
+  max_jobs: 500
+  location: "London, UK"
+  job_titles:
+    - "data scientist"
+    - "machine learning engineer"
+    - "data engineer"
+
+pipeline:
+  chunk_size: 256          # tokens per chunk
+  chunk_overlap: 40        # token overlap between chunks
+  embedding_model: "all-MiniLM-L6-v2"
+  top_k: 5                 # chunks to retrieve per query
+
+mlflow:
+  experiment_name: "jobsense-rag"
+  tracking_uri: "mlruns"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
