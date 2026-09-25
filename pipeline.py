@@ -1,33 +1,3 @@
-"""
-pipeline.py
-~~~~~~~~~~~~
-CLI entry point for the JobSense pipeline.
-
-Commands
---------
-    python pipeline.py index               — fetch jobs + build vector index
-    python pipeline.py index --no-fetch    — re-index from saved raw jobs
-    python pipeline.py query "your query"  — RAG query against the index
-
-Examples
---------
-    # Fetch fresh jobs and build the index
-    python pipeline.py index
-
-    # Use custom queries and location
-    python pipeline.py index \
-        --queries "PySpark engineer" "MLOps engineer" "LLM engineer" \
-        --location "London, UK" \
-        --max-per-query 20
-
-    # Re-chunk and re-embed without hitting Adzuna again
-    python pipeline.py index --no-fetch
-
-    # Query the index
-    python pipeline.py query "Python data engineer with Spark experience"
-    python pipeline.py query "entry level ML engineer" --top-k 3
-"""
-
 from __future__ import annotations
 
 import argparse
