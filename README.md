@@ -1,8 +1,8 @@
 # JobSense 🧠
 
-> Real-time job market intelligence powered by a custom RAG pipeline.
+> Real-time job market intelligence powered by a custom RAG pipeline and Claude AI.
 
-JobSense searches live job listings and uses Claude AI to generate grounded, honest career insights with no hallucinations, no generic advice. Every answer is backed by real job data fetched from the Adzuna API.
+JobSense searches live job listings and uses Claude to generate grounded, honest career insights. Every answer is backed by real job data fetched from the Adzuna API.
 
 ---
 
@@ -11,18 +11,21 @@ JobSense searches live job listings and uses Claude AI to generate grounded, hon
 Ask JobSense anything about the job market:
 
 - *"What data engineering roles are hiring in London right now?"*
-- *"I know Python and Spark — what roles suit me?"*
+- *"I know Python and Spark — what jobs suit me?"*
 - *"What salary should I expect as an MLOps engineer?"*
+- *"Which companies are hiring ML engineers right now?"*
 
-It fetches real listings, finds the most relevant ones using semantic search,
-and hands them to Claude to generate a grounded answer with sources.
+It fetches real listings, finds the most relevant ones using semantic search, and hands them to Claude to generate a grounded answer with sources.
 
 ---
 
 ## Architecture
 
 ```
-User Query
+User Query (Next.js chatbot UI)
+    │
+    ▼
+FastAPI /query endpoint
     │
     ▼
 Embedder (all-MiniLM-L6-v2)     ← turns query into 384-dim vector
@@ -37,7 +40,7 @@ Retriever                        ← deduplicates, ranks results
 Synthesiser (Claude)             ← generates grounded answer
     │
     ▼
-Answer + Sources
+Answer + Sources (chatbot UI)
 ```
 
 ---
@@ -46,15 +49,16 @@ Answer + Sources
 
 | Layer | Technology |
 |---|---|
-| Data source | Adzuna Jobs API |
+| Frontend | Next.js 15, Tailwind CSS, TypeScript |
+| API | FastAPI |
+| LLM | Claude claude-sonnet-4-6 (Anthropic) |
 | Embeddings | sentence-transformers / all-MiniLM-L6-v2 |
 | Vector store | NumPy (custom, no external DB) |
-| LLM | Claude claude-sonnet-4-6 (Anthropic) |
-| MLOps | MLflow (experiment tracking) |
-| API | FastAPI |
+| Data source | Adzuna Jobs API |
+| MLOps | MLflow |
 | CLI | Python argparse |
 
-Built without LangChain or LlamaIndex — every component written from scratch.
+
 
 ---
 
@@ -74,6 +78,10 @@ jobsense/
 │       └── synthesiser.py      # context + Claude → grounded answer
 ├── api/
 │   └── main.py                 # FastAPI — /health /index /query
+├── frontend/                   # Next.js chatbot UI
+│   └── app/
+│       ├── page.tsx            # chatbot interface
+│       └── layout.tsx          # app shell
 ├── pipeline.py                 # CLI entry point
 ├── config.yaml                 # chunk size, model, location, top_k
 └── pyproject.toml
@@ -122,7 +130,25 @@ python pipeline.py index \
 python pipeline.py index --no-fetch
 ```
 
-### 4. Query
+### 4. Start the API
+
+```bash
+uvicorn api.main:app --port 8000
+```
+
+### 5. Start the frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open **http://localhost:3000** — the chatbot is ready.
+
+---
+
+## CLI Usage
 
 ```bash
 python pipeline.py query "Python data engineer with Spark experience"
@@ -133,15 +159,7 @@ python pipeline.py query "entry level ML engineer London" --top-k 3
 
 ## API
 
-Start the server:
-
-```bash
-uvicorn api.main:app --port 8000
-```
-
 Interactive docs at **http://localhost:8000/docs**
-
-### Endpoints
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -192,7 +210,7 @@ curl -X POST http://localhost:8000/query \
 
 ## MLflow Tracking
 
-Every pipeline run is tracked automatically. Start the dashboard:
+Every pipeline run is tracked automatically:
 
 ```bash
 mlflow ui
