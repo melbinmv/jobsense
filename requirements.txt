@@ -107,7 +107,6 @@ jedi==0.20.0
 Jinja2==3.1.6
 jiter==0.17.0
 joblib==1.6.0
--e git+https://github.com/melbinmv/jobsense.git@7abadbed4698cc5488755e19566b9666d16355ef#egg=jobsense
 json5==0.15.0
 jsonpointer==3.1.1
 jsonschema==4.26.0
