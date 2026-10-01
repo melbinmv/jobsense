@@ -215,7 +215,7 @@ async def query(request: QueryRequest):
             top_k     = request.top_k,
         )
     except Exception as exc:
-        logger.exception("Synthesis failed: %s", exc)
+        logger.exception("Synthesis failed")
         raise HTTPException(status_code=500, detail=str(exc))
 
     return result.to_dict()
@@ -262,7 +262,7 @@ async def build_index(request: IndexRequest):
         logger.info("Index rebuilt  size=%d", store.size)
 
     except Exception as exc:
-        logger.exception("Index build failed: %s", exc)
+        logger.exception("Index build failed")
         raise HTTPException(status_code=500, detail=str(exc))
 
     return {

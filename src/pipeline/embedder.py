@@ -200,7 +200,6 @@ class Embedder:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import json
     logging.basicConfig(
         level   = logging.INFO,
         format  = "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -271,7 +270,7 @@ if __name__ == "__main__":
     v0, v1 = chunks[0]["embedding"], chunks[1]["embedding"]
     sim = float(np.dot(v0, v1))
     print(f"\n  Cosine sim between chunk 0 and chunk 1: {sim:.4f}")
-    print(f"  (Both from same job — expect high similarity ~0.8+)\n")
+    print("  (Both from same job — expect high similarity ~0.8+)\n")
 
     # Also test embed_query
     q_vec = embedder.embed_query("data engineer Spark Python")

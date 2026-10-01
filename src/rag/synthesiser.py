@@ -15,7 +15,6 @@ from typing import Any
 
 import anthropic
 import mlflow
-import yaml
 from dotenv import load_dotenv
 
 load_dotenv()

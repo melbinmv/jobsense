@@ -105,14 +105,14 @@ def cmd_index(args: argparse.Namespace) -> None:
 
     # -- Summary -----------------------------------------------------------
     print(f"\n{divider}")
-    print(f"  Index built successfully")
+    print("  Index built successfully")
     print(f"  Jobs fetched   : {len(jobs)}")
     print(f"  Chunks indexed : {store.size}")
     print(f"  Model          : {embedder.model_name}")
     print(f"  Index location : {store.store_dir}")
     print(f"  Raw jobs saved : {RAW_JOBS_PATH}")
-    print(f"\n  Run a query:")
-    print(f'  python pipeline.py query "your job search query"')
+    print("\n  Run a query:")
+    print('  python pipeline.py query "your job search query"')
     print(f"{divider}\n")
 
 

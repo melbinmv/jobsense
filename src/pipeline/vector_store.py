@@ -335,7 +335,6 @@ def _dvc_add(path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import sys
     logging.basicConfig(
         level   = logging.INFO,
         format  = "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -390,13 +389,13 @@ if __name__ == "__main__":
     divider = "─" * 64
     print(f"\n{divider}")
     print(f"  Index size : {store2.size} chunks")
-    print(f"  Query      : synthetic vector close to 'Data Engineer'")
-    print(f"  Top-3 results:")
+    print("  Query      : synthetic vector close to 'Data Engineer'")
+    print("  Top-3 results:")
     print(divider)
     for r in results:
         print(f"  [{r['score']:.4f}]  {r['title']}  @  {r['company']}")
 
-    print(f"\n  Files written:")
+    print("\n  Files written:")
     for f in sorted(store.store_dir.iterdir()):
         size_kb = f.stat().st_size / 1024
         print(f"    {f.name:<25}  {size_kb:.1f} KB")

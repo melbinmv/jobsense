@@ -249,7 +249,7 @@ def _make_fallback_id(job: JobRecord) -> str:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import json, sys
+    import json
     logging.basicConfig(
         level   = logging.INFO,
         format  = "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -294,7 +294,7 @@ if __name__ == "__main__":
     for c in chunks:
         print(f"\n  Chunk [{c['chunk_index']+1}/{c['total_chunks']}]  id={c['chunk_id']}")
         print(f"  Words: {len(c['text'].split())}")
-        print(f"  Text preview:")
+        print("  Text preview:")
         print(f"    {c['text'][:180]}…" if len(c["text"]) > 180 else f"    {c['text']}")
 
     print(f"\n{divider}\n")
