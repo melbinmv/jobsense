@@ -307,9 +307,9 @@ def _serialisable(obj: Any) -> Any:
         return [_serialisable(v) for v in obj]
     if isinstance(obj, np.ndarray):
         return obj.tolist()
-    if isinstance(obj, (np.integer,)):
+    if isinstance(obj, np.integer):
         return int(obj)
-    if isinstance(obj, (np.floating,)):
+    if isinstance(obj, np.floating):
         return float(obj)
     return obj
 
