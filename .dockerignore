@@ -1,0 +1,42 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Environment
+.env
+.env.*
+
+# Data (mounted as volume)
+data/raw/
+data/processed/
+*.npy
+
+# MLflow (mounted as volume)
+mlruns/
+
+# Model cache
+.cache/
+models/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Git
+.git/
+.gitignore
+
+# Docs
+README.md
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
