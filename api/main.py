@@ -9,7 +9,6 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,12 +17,12 @@ from pydantic import BaseModel, Field
 # Allow imports from project root when running as a module
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.ingestion.job_fetcher      import JobFetcher
-from src.pipeline.chunker           import Chunker
-from src.pipeline.embedder          import Embedder
-from src.pipeline.vector_store      import VectorStore
-from src.rag.retriever              import Retriever
-from src.rag.synthesiser            import Synthesiser
+from src.ingestion.job_fetcher import JobFetcher
+from src.pipeline.chunker import Chunker
+from src.pipeline.embedder import Embedder
+from src.pipeline.vector_store import VectorStore
+from src.rag.retriever import Retriever
+from src.rag.synthesiser import Synthesiser
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -106,7 +105,7 @@ class QueryRequest(BaseModel):
         max_length = 500,
         example    = "Python data engineer with Spark and dbt experience",
     )
-    top_k: Optional[int] = Field(
+    top_k: int | None = Field(
         default = None,
         ge      = 1,
         le      = 20,
@@ -121,7 +120,7 @@ class IndexRequest(BaseModel):
         example  = ["data engineer", "machine learning engineer"],
         description = "Job search queries to fetch from Adzuna",
     )
-    location: Optional[str] = Field(
+    location: str | None = Field(
         default     = None,
         example     = "London, UK",
         description = "Override the location in config.yaml",

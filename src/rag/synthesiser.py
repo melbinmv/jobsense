@@ -115,7 +115,7 @@ class Synthesiser:
     ):
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
-            raise EnvironmentError(
+            raise OSError(
                 "ANTHROPIC_API_KEY not found. Add it to your .env file."
             )
 
@@ -286,9 +286,9 @@ if __name__ == "__main__":
         datefmt = "%H:%M:%S",
     )
 
-    from src.pipeline.embedder     import Embedder
+    from src.pipeline.embedder import Embedder
     from src.pipeline.vector_store import VectorStore
-    from src.rag.retriever         import Retriever
+    from src.rag.retriever import Retriever
 
     # ── Boot the stack ────────────────────────────────────────────────────
     embedder  = Embedder()

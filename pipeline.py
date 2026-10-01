@@ -34,10 +34,10 @@ def cmd_index(args: argparse.Namespace) -> None:
     If --no-fetch is passed, skips the Adzuna call and re-uses the
     raw jobs saved from the previous run (data/raw/jobs.json).
     """
-    from src.ingestion.job_fetcher  import JobFetcher
-    from src.pipeline.chunker       import Chunker
-    from src.pipeline.embedder      import Embedder
-    from src.pipeline.vector_store  import VectorStore
+    from src.ingestion.job_fetcher import JobFetcher
+    from src.pipeline.chunker import Chunker
+    from src.pipeline.embedder import Embedder
+    from src.pipeline.vector_store import VectorStore
 
     divider = "─" * 64
 
@@ -121,10 +121,10 @@ def cmd_query(args: argparse.Namespace) -> None:
     Load the vector index and run a RAG query.
     Prints Claude's answer + source job listings to the terminal.
     """
-    from src.pipeline.embedder      import Embedder
-    from src.pipeline.vector_store  import VectorStore
-    from src.rag.retriever          import Retriever
-    from src.rag.synthesiser        import Synthesiser
+    from src.pipeline.embedder import Embedder
+    from src.pipeline.vector_store import VectorStore
+    from src.rag.retriever import Retriever
+    from src.rag.synthesiser import Synthesiser
 
     divider = "─" * 64
 

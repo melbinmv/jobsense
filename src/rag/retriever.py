@@ -263,7 +263,7 @@ if __name__ == "__main__":
         datefmt = "%H:%M:%S",
     )
 
-    from src.pipeline.embedder     import Embedder
+    from src.pipeline.embedder import Embedder
     from src.pipeline.vector_store import VectorStore
 
     # ── Load components ───────────────────────────────────────────────────

@@ -26,10 +26,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Install ruff (pinned to match local)
+        run: pip install ruff==0.11.13
 
-      - name: Lint src/
+      - name: Lint src/, api/, pipeline.py
         run: ruff check src/ api/ pipeline.py --ignore E501
 
   # ── Job 2: Build Docker images ─────────────────────────────────────────────

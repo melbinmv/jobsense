@@ -8,7 +8,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import requests
 import yaml
@@ -118,7 +118,7 @@ class JobFetcher:
         self._api_key = os.getenv("ADZUNA_API_KEY")
 
         if not self._app_id or not self._api_key:
-            raise EnvironmentError(
+            raise OSError(
                 "Adzuna credentials missing.\n"
                 "Add these to your .env file:\n"
                 "  ADZUNA_APP_ID=your_app_id\n"
@@ -161,7 +161,7 @@ class JobFetcher:
     def search_jobs(
         self,
         query:    str,
-        location: Optional[str] = None,
+        location: str | None = None,
         limit:    int = 20,
     ) -> list[JobRecord]:
         """
@@ -223,7 +223,7 @@ class JobFetcher:
     def fetch(
         self,
         query:         str,
-        location:      Optional[str] = None,
+        location:      str | None = None,
         max_results:   int  = 20,
         fetch_details: bool = True,   # kept for API compatibility; Adzuna returns
     ) -> list[JobRecord]:             # full descriptions in search results already
@@ -256,7 +256,7 @@ class JobFetcher:
     def fetch_multi(
         self,
         queries:       list[str],
-        location:      Optional[str] = None,
+        location:      str | None = None,
         max_per_query: int  = 20,
         fetch_details: bool = True,
     ) -> list[JobRecord]:
