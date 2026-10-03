@@ -26,10 +26,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install ruff (pinned to match local)
-        run: pip install ruff==0.11.13
+      - name: Install ruff
+        run: pip install ruff
 
-      - name: Lint src/, api/, pipeline.py
+      - name: Lint src/
         run: ruff check src/ api/ pipeline.py --ignore E501
 
   # ── Job 2: Build Docker images ─────────────────────────────────────────────
@@ -62,6 +62,8 @@ jobs:
           file: ./frontend/Dockerfile
           push: false
           tags: jobsense-frontend:latest
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -103,6 +105,8 @@ jobs:
           file: ./frontend/Dockerfile
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE }}:latest
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
