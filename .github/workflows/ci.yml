@@ -3,8 +3,16 @@ name: CI/CD
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '*.md'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '*.md'
 
 env:
   REGISTRY: ${{ secrets.AZURE_REGISTRY }}

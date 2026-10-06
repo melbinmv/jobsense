@@ -6,6 +6,13 @@ JobSense searches live job listings and uses Claude to generate grounded, honest
 
 ---
 
+## Live Demo
+
+- **Frontend** → [jobsense-frontend.azurewebsites.net](https://jobsense-frontend-hkbyeaewepdsc9bs.westus3-01.azurewebsites.net)
+- **API** → [jobsense-api.azurewebsites.net/docs](https://jobsense-api-ddhjhreudabcanea.westus3-01.azurewebsites.net/docs)
+
+---
+
 ## What it does
 
 Ask JobSense anything about the job market:
@@ -56,9 +63,12 @@ Answer + Sources (chatbot UI)
 | Vector store | NumPy (custom, no external DB) |
 | Data source | Adzuna Jobs API |
 | MLOps | MLflow |
+| Containerisation | Docker, Docker Compose |
+| CI/CD | GitHub Actions |
+| Cloud | Azure App Service, Azure Container Registry |
 | CLI | Python argparse |
 
-
+Built without LangChain or LlamaIndex — every RAG component written from scratch.
 
 ---
 
@@ -79,9 +89,15 @@ jobsense/
 ├── api/
 │   └── main.py                 # FastAPI — /health /index /query
 ├── frontend/                   # Next.js chatbot UI
+│   ├── Dockerfile
 │   └── app/
 │       ├── page.tsx            # chatbot interface
 │       └── layout.tsx          # app shell
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # GitHub Actions CI/CD pipeline
+├── Dockerfile                  # API container
+├── docker-compose.yml          # run full stack locally
 ├── pipeline.py                 # CLI entry point
 ├── config.yaml                 # chunk size, model, location, top_k
 └── pyproject.toml
@@ -148,6 +164,33 @@ Open **http://localhost:3000** — the chatbot is ready.
 
 ---
 
+## Run with Docker
+
+```bash
+# Run the full stack with one command
+docker-compose up --build
+
+# API → http://localhost:8000
+# UI  → http://localhost:3000
+```
+
+---
+
+## CI/CD Pipeline
+
+Every push to `main` triggers a GitHub Actions pipeline:
+
+```
+lint    → ruff checks Python code quality
+build   → builds both Docker images
+deploy  → pushes to Azure Container Registry
+        → deploys to Azure App Service
+```
+
+Docs-only changes (README, markdown files) skip the pipeline automatically.
+
+---
+
 ## CLI Usage
 
 ```bash
@@ -171,12 +214,6 @@ Interactive docs at **http://localhost:8000/docs**
 ### Example
 
 ```bash
-# Build index
-curl -X POST http://localhost:8000/index \
-     -H "Content-Type: application/json" \
-     -d '{"queries": ["data engineer", "ML engineer"], "max_per_query": 15}'
-
-# Query
 curl -X POST http://localhost:8000/query \
      -H "Content-Type: application/json" \
      -d '{"query": "Python data engineer with Spark experience"}'
