@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -48,7 +49,7 @@ class VectorStore:
     Parameters
     ----------
     config_path:
-        Path to config.yaml.  Reads ``top_k`` default.
+        Path to config.yaml.  Reads ``top_k`` default and ``blob`` settings.
     store_dir:
         Directory for embeddings.npy + chunks.json.
         Created automatically if it doesn't exist.
@@ -66,12 +67,23 @@ class VectorStore:
         mlflow_experiment: str        = "jobsense-index",
     ):
         cfg           = _load_config(config_path)
-        self.top_k    = int(cfg.get("top_k", 5))
+        # top_k lives under `pipeline:` in config.yaml; fall back to top-level
+        self.top_k    = int(
+            (cfg.get("pipeline") or {}).get("top_k", cfg.get("top_k", 5))
+        )
         self.store_dir = Path(store_dir)
         self.store_dir.mkdir(parents=True, exist_ok=True)
 
         self._embeddings_path = self.store_dir / self._EMBEDDINGS_FILE
         self._chunks_path     = self.store_dir / self._CHUNKS_FILE
+
+        # Azure Blob persistence (optional — disabled if no connection string)
+        blob_cfg = cfg.get("blob", {}) or {}
+        self._blob_container_name = blob_cfg.get("container", "jobsense-index")
+        self._blob_prefix         = blob_cfg.get("prefix", "current/")
+        self._blob_conn_str       = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+        self.index_source: str    = "none"    # none | built | blob | disk
+        self.blob_synced:  bool   = False
 
         # In-memory state (populated by build() or load())
         self._matrix:  np.ndarray | None = None   # shape (N, dim)
@@ -81,8 +93,8 @@ class VectorStore:
         self._mlflow_experiment = mlflow_experiment
 
         logger.info(
-            "VectorStore ready  store_dir=%s  top_k=%d",
-            self.store_dir, self.top_k,
+            "VectorStore ready  store_dir=%s  top_k=%d  blob_enabled=%s",
+            self.store_dir, self.top_k, self.blob_enabled,
         )
 
     # ------------------------------------------------------------------
@@ -98,6 +110,10 @@ class VectorStore:
     def is_loaded(self) -> bool:
         return self._matrix is not None and len(self._chunks) > 0
 
+    @property
+    def blob_enabled(self) -> bool:
+        return bool(self._blob_conn_str)
+
     # ------------------------------------------------------------------
     # Build (index time)
     # ------------------------------------------------------------------
@@ -109,7 +125,8 @@ class VectorStore:
         run_name:   str  = "build_index",
     ) -> None:
         """
-        Build the index from a list of embedded Chunks and persist to disk.
+        Build the index from a list of embedded Chunks and persist to disk
+        (and to Azure Blob, if configured).
 
         Parameters
         ----------
@@ -162,6 +179,19 @@ class VectorStore:
             self.size, embedding_dim, elapsed, self.store_dir,
         )
 
+        # ── 3b. Azure Blob (optional) ─────────────────────────────────────
+        self.index_source = "built"
+        self.blob_synced  = False
+        if self.blob_enabled:
+            try:
+                self._upload_to_blob()
+                self.blob_synced = True
+            except Exception:
+                logger.exception(
+                    "Blob upload failed — index is in memory and on local disk "
+                    "but will be lost on restart"
+                )
+
         # ── 4. MLflow ─────────────────────────────────────────────────────
         with mlflow.start_run(run_name=run_name):
             mlflow.log_params({
@@ -184,14 +214,26 @@ class VectorStore:
 
     def load(self) -> None:
         """
-        Load a previously built index from disk into memory.
+        Load a previously built index into memory.
 
-        Raises FileNotFoundError if build() has never been run.
+        If Azure Blob is configured, the blob copy is downloaded first (and
+        becomes the local cache).  Falls back to local disk if the blob is
+        missing or unreachable.  Raises FileNotFoundError if neither exists.
         """
-        if not self._embeddings_path.exists():
+        from_blob = False
+        if self.blob_enabled:
+            try:
+                from_blob = self._download_from_blob()
+                if not from_blob:
+                    logger.warning("No index in Blob container — trying local disk")
+            except Exception:
+                logger.exception("Blob download failed — trying local disk")
+
+        if not self._embeddings_path.exists() or not self._chunks_path.exists():
             raise FileNotFoundError(
-                f"No index found at {self._embeddings_path}.\n"
-                "Run `python pipeline.py index` to build the index first."
+                f"No index found at {self._embeddings_path} "
+                f"(blob_enabled={self.blob_enabled}).\n"
+                "Call POST /index (or run `python pipeline.py index`) to build one."
             )
 
         logger.info("Loading index from %s …", self.store_dir)
@@ -199,9 +241,11 @@ class VectorStore:
         with open(self._chunks_path) as fh:
             self._chunks = json.load(fh)
 
+        self.index_source = "blob" if from_blob else "disk"
+        self.blob_synced  = from_blob
         logger.info(
-            "Index loaded  %d chunks  dim=%d",
-            self.size, self._matrix.shape[1],
+            "Index loaded  %d chunks  dim=%d  source=%s",
+            self.size, self._matrix.shape[1], self.index_source,
         )
 
     # ------------------------------------------------------------------
@@ -293,6 +337,63 @@ class VectorStore:
             len(self._chunks), len(chunks), len(combined),
         )
         self.build(combined, dvc_track=dvc_track, run_name="add_chunks")
+
+    # ------------------------------------------------------------------
+    # Azure Blob persistence
+    # ------------------------------------------------------------------
+
+    def _container_client(self):
+        # Imported lazily so local dev works without the package/credentials.
+        from azure.storage.blob import BlobServiceClient
+        service = BlobServiceClient.from_connection_string(self._blob_conn_str)
+        return service.get_container_client(self._blob_container_name)
+
+    def _upload_to_blob(self) -> None:
+        from azure.core.exceptions import ResourceExistsError
+
+        container = self._container_client()
+        try:
+            container.create_container()
+        except ResourceExistsError:
+            pass
+
+        # embeddings first, chunks second
+        for path in (self._embeddings_path, self._chunks_path):
+            with open(path, "rb") as fh:
+                container.upload_blob(
+                    name      = f"{self._blob_prefix}{path.name}",
+                    data      = fh,
+                    overwrite = True,
+                )
+        logger.info(
+            "Index uploaded to blob  container=%s  prefix=%s",
+            self._blob_container_name, self._blob_prefix,
+        )
+
+    def _download_from_blob(self) -> bool:
+        """Download both files atomically. Returns False if the blobs don't exist."""
+        from azure.core.exceptions import ResourceNotFoundError
+
+        container = self._container_client()
+        pairs = [
+            (p.with_name(p.name + ".tmp"), p)
+            for p in (self._embeddings_path, self._chunks_path)
+        ]
+        try:
+            for tmp, final in pairs:
+                blob = container.download_blob(f"{self._blob_prefix}{final.name}")
+                with open(tmp, "wb") as fh:
+                    blob.readinto(fh)
+            for tmp, final in pairs:
+                os.replace(tmp, final)
+        except ResourceNotFoundError:
+            return False
+        finally:
+            for tmp, _ in pairs:
+                tmp.unlink(missing_ok=True)
+
+        logger.info("Index downloaded from blob  container=%s", self._blob_container_name)
+        return True
 
 
 # ---------------------------------------------------------------------------

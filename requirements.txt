@@ -261,3 +261,4 @@ widgetsnbextension==4.0.16
 yarl==1.25.1
 zc.lockfile==4.0
 zipp==4.1.0
+azure-storage-blob>=12.19,<13

@@ -19,3 +19,7 @@ mlflow:
 api:
   host: "0.0.0.0"
   port: 8000
+
+blob:
+  container: "jobsense-index"   # Azure Blob container (created on first upload)
+  prefix: "current/"            # blob name prefix for embeddings.npy / chunks.json

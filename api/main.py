@@ -55,11 +55,15 @@ async def lifespan(app: FastAPI):
     _state["chunker"]   = Chunker()
     _state["synth"]     = Synthesiser()
 
-    # Load index if it exists; otherwise the /index endpoint must be called first
+    # Load index (from Azure Blob if configured, else local disk).
+    # If nothing exists, the /index endpoint must be called first.
     try:
         _state["store"].load()
         _state["retriever"] = Retriever(_state["embedder"], _state["store"])
-        logger.info("Index loaded  size=%d chunks", _state["store"].size)
+        logger.info(
+            "Index loaded  size=%d chunks  source=%s",
+            _state["store"].size, _state["store"].index_source,
+        )
     except FileNotFoundError:
         logger.warning(
             "No index found. Call POST /index to build one before querying."
@@ -134,10 +138,12 @@ class IndexRequest(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status:      str
-    index_size:  int
-    model:       str
-    index_ready: bool
+    status:       str
+    index_size:   int
+    model:        str
+    index_ready:  bool
+    index_source: str      # none | built | blob | disk
+    blob_enabled: bool
 
 
 class IndexStatsResponse(BaseModel):
@@ -149,10 +155,11 @@ class IndexStatsResponse(BaseModel):
 
 
 class IndexResponse(BaseModel):
-    status:         str
-    jobs_fetched:   int
-    chunks_indexed: int
-    queries_used:   list[str]
+    status:            str
+    jobs_fetched:      int
+    chunks_indexed:    int
+    queries_used:      list[str]
+    persisted_to_blob: bool
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +172,12 @@ async def health():
     store: VectorStore = _state["store"]
     embedder: Embedder = _state["embedder"]
     return {
-        "status":      "ok",
-        "index_size":  store.size,
-        "model":       embedder.model_name,
-        "index_ready": store.is_loaded,
+        "status":       "ok",
+        "index_size":   store.size,
+        "model":        embedder.model_name,
+        "index_ready":  store.is_loaded,
+        "index_source": store.index_source,
+        "blob_enabled": store.blob_enabled,
     }
 
 
@@ -225,8 +234,9 @@ async def build_index(request: IndexRequest):
     """
     Fetch fresh jobs from Adzuna, chunk, embed, and rebuild the vector index.
 
-    This replaces the existing index. Typical run time: 2-5 minutes
-    depending on max_per_query and network speed.
+    This replaces the existing index (and the copy in Azure Blob, if
+    configured). Typical run time: 2-5 minutes depending on
+    max_per_query and network speed.
     """
     logger.info(
         "Index build triggered  queries=%s  location=%s  max_per_query=%d",
@@ -252,7 +262,7 @@ async def build_index(request: IndexRequest):
         embedder: Embedder = _state["embedder"]
         chunks             = embedder.embed_chunks(chunks)
 
-        # 4. Build index
+        # 4. Build index (also uploads to Blob if configured)
         store: VectorStore = _state["store"]
         store.build(chunks)
 
@@ -265,10 +275,11 @@ async def build_index(request: IndexRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
     return {
-        "status":         "ok",
-        "jobs_fetched":   len(jobs),
-        "chunks_indexed": len(chunks),
-        "queries_used":   request.queries,
+        "status":            "ok",
+        "jobs_fetched":      len(jobs),
+        "chunks_indexed":    len(chunks),
+        "queries_used":      request.queries,
+        "persisted_to_blob": store.blob_synced,
     }
 
 
