@@ -28,6 +28,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Sanity check: fail the build early if uvicorn's dependencies are missing
 RUN python -c "import uvicorn, h11, httpx; print('uvicorn/h11/httpx OK')"
 
+# Bake the embedding model into the image so cold starts don't download it.
+# Placed before COPY src/ so this layer is cached across code changes.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # Copy source code
 COPY src/ ./src/
 COPY api/ ./api/

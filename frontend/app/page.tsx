@@ -5,6 +5,15 @@ import ReactMarkdown from "react-markdown";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// How often to retry /health while the backend is waking up
+const HEALTH_RETRY_MS = 3000;
+// Per-attempt timeout for /health (a cold container can hang the request)
+const HEALTH_TIMEOUT_MS = 15000;
+// Max time to wait for a /query answer
+const QUERY_TIMEOUT_MS = 90000;
+
+type ApiStatus = "waking" | "ready" | "noindex";
+
 type Source = {
   rank: number;
   score: number;
@@ -22,6 +31,20 @@ type Message = {
   sources?: Source[];
   loading?: boolean;
 };
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function SourceCard({ source }: { source: Source }) {
   return (
@@ -110,15 +133,14 @@ function ChatMessage({ message }: { message: Message }) {
             <ThinkingDots />
           ) : (
             <>
-            
               <div className="prose prose-invert prose-sm max-w-none
                 prose-headings:text-[#e6edf3]
                 prose-p:text-[#e6edf3]
                 prose-strong:text-[#e6edf3]
                 prose-li:text-[#e6edf3]
                 prose-a:text-[#4dabf7]">
-  <ReactMarkdown>{message.content}</ReactMarkdown>
-</div>
+                <ReactMarkdown>{message.content}</ReactMarkdown>
+              </div>
               {message.sources && message.sources.length > 0 && (
                 <Sources sources={message.sources} />
               )}
@@ -130,7 +152,41 @@ function ChatMessage({ message }: { message: Message }) {
   );
 }
 
-function EmptyState() {
+function StatusBanner({
+  status,
+  waitedSecs,
+}: {
+  status: ApiStatus;
+  waitedSecs: number;
+}) {
+  if (status === "ready") return null;
+
+  if (status === "noindex") {
+    return (
+      <div className="shrink-0 px-6 py-2.5 bg-[#2a1a1a] border-b border-[#5c2a2a] text-xs text-[#f08b8b] text-center">
+        The server is up, but the job index is empty. Build it with POST /index, then refresh.
+      </div>
+    );
+  }
+
+  return (
+    <div className="shrink-0 px-6 py-2.5 bg-[#1a2236] border-b border-[#2a3a5c] flex items-center justify-center gap-2.5">
+      <span className="w-3.5 h-3.5 rounded-full border-2 border-[#4dabf7] border-t-transparent animate-spin" />
+      <span className="text-xs text-[#8b949e]">
+        Waking up the server, this can take a minute…
+        {waitedSecs >= 30 && " Still starting, almost there."}
+      </span>
+    </div>
+  );
+}
+
+function EmptyState({
+  onPick,
+  disabled,
+}: {
+  onPick: (text: string) => void;
+  disabled: boolean;
+}) {
   const suggestions = [
     "What data engineering roles are hiring in London?",
     "I know Python and Spark — what jobs suit me?",
@@ -153,15 +209,9 @@ function EmptyState() {
         {suggestions.map((s) => (
           <button
             key={s}
-            onClick={() => {
-              const input = document.getElementById("chat-input") as HTMLTextAreaElement;
-              if (input) {
-                input.value = s;
-                input.dispatchEvent(new Event("input", { bubbles: true }));
-                input.focus();
-              }
-            }}
-            className="text-left px-4 py-2.5 rounded-xl bg-[#161b22] border border-[#2a3a5c] text-sm text-[#8b949e] hover:text-[#e6edf3] hover:border-[#4dabf7] transition-colors"
+            onClick={() => onPick(s)}
+            disabled={disabled}
+            className="text-left px-4 py-2.5 rounded-xl bg-[#161b22] border border-[#2a3a5c] text-sm text-[#8b949e] hover:text-[#e6edf3] hover:border-[#4dabf7] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-[#8b949e] disabled:hover:border-[#2a3a5c]"
           >
             {s}
           </button>
@@ -175,16 +225,65 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [apiStatus, setApiStatus] = useState<ApiStatus>("waking");
+  const [waitedSecs, setWaitedSecs] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const isReady = apiStatus === "ready";
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Wake-up check: poll /health until the API answers.
+  // Re-runs whenever apiStatus goes back to "waking" (e.g. after a failed query).
+  useEffect(() => {
+    if (apiStatus !== "waking") return;
+
+    let cancelled = false;
+    const started = Date.now();
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    (async () => {
+      while (!cancelled) {
+        try {
+          const res = await fetchWithTimeout(
+            `${API_URL}/health`,
+            { cache: "no-store" },
+            HEALTH_TIMEOUT_MS
+          );
+          if (res.ok) {
+            const data = await res.json();
+            if (!cancelled) {
+              setApiStatus(data.index_ready ? "ready" : "noindex");
+            }
+            return;
+          }
+        } catch {
+          // Network error, timeout or non-JSON gateway page: the app is still
+          // starting. Fall through and retry.
+        }
+        if (cancelled) return;
+        setWaitedSecs(Math.round((Date.now() - started) / 1000));
+        await sleep(HEALTH_RETRY_MS);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiStatus]);
+
+  const handlePick = (text: string) => {
+    setInput(text);
+    textareaRef.current?.focus();
+  };
+
   const handleSubmit = async () => {
     const query = input.trim();
-    if (!query || isLoading) return;
+    if (!query || isLoading || !isReady) return;
 
     const userMsg: Message = {
       id: Date.now().toString(),
@@ -208,15 +307,26 @@ export default function Home() {
     }
 
     try {
-      const res = await fetch(`${API_URL}/query`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
-      });
+      const res = await fetchWithTimeout(
+        `${API_URL}/query`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query }),
+        },
+        QUERY_TIMEOUT_MS
+      );
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Something went wrong");
+        let detail = "Something went wrong";
+        try {
+          const err = await res.json();
+          detail = err.detail || detail;
+        } catch {
+          // Non-JSON error body (e.g. a gateway error page)
+          detail = `The server returned an error (${res.status}).`;
+        }
+        throw new Error(detail);
       }
 
       const data = await res.json();
@@ -234,7 +344,25 @@ export default function Home() {
         )
       );
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to reach the JobSense API. Is it running on port 8000?";
+      let message: string;
+
+      if (err instanceof DOMException && err.name === "AbortError") {
+        message =
+          "That took too long. The server may be waking up, so I'm reconnecting. Try again in a moment.";
+        setWaitedSecs(0);
+        setApiStatus("waking");
+      } else if (err instanceof TypeError) {
+        // fetch() itself failed: server unreachable or asleep
+        message =
+          "Lost connection to the server. It may have gone to sleep, so I'm reconnecting. Try again in a moment.";
+        setWaitedSecs(0);
+        setApiStatus("waking");
+      } else if (err instanceof Error) {
+        message = err.message;
+      } else {
+        message = "Failed to reach the JobSense API.";
+      }
+
       setMessages((prev) =>
         prev.map((m) =>
           m.id === loadingMsg.id
@@ -260,6 +388,12 @@ export default function Home() {
     e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
   };
 
+  const placeholder = isReady
+    ? "Ask about jobs, salaries, or skills…"
+    : apiStatus === "waking"
+    ? "Waiting for the server to wake up…"
+    : "The job index is empty";
+
   return (
     <div className="flex flex-col h-screen bg-[#0d1117]">
       {/* Header */}
@@ -275,11 +409,14 @@ export default function Home() {
         </span>
       </header>
 
+      {/* Server status */}
+      <StatusBanner status={apiStatus} waitedSecs={waitedSecs} />
+
       {/* Messages */}
       <main className="flex-1 overflow-y-auto px-4 py-6">
         <div className="max-w-2xl mx-auto">
           {messages.length === 0 ? (
-            <EmptyState />
+            <EmptyState onPick={handlePick} disabled={!isReady} />
           ) : (
             <div className="flex flex-col gap-4">
               {messages.map((m) => (
@@ -301,14 +438,15 @@ export default function Home() {
               value={input}
               onChange={handleInput}
               onKeyDown={handleKeyDown}
-              placeholder="Ask about jobs, salaries, or skills…"
+              placeholder={placeholder}
+              disabled={!isReady}
               rows={1}
-              className="flex-1 bg-transparent text-sm text-[#e6edf3] placeholder-[#8b949e] resize-none outline-none leading-relaxed"
+              className="flex-1 bg-transparent text-sm text-[#e6edf3] placeholder-[#8b949e] resize-none outline-none leading-relaxed disabled:cursor-not-allowed"
               style={{ maxHeight: "160px" }}
             />
             <button
               onClick={handleSubmit}
-              disabled={!input.trim() || isLoading}
+              disabled={!input.trim() || isLoading || !isReady}
               className="shrink-0 w-8 h-8 rounded-xl bg-[#4dabf7] flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[#74c0fc] transition-colors"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none">

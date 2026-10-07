@@ -138,6 +138,8 @@ class IndexRequest(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
     status:       str
     index_size:   int
     model:        str
@@ -147,6 +149,8 @@ class HealthResponse(BaseModel):
 
 
 class IndexStatsResponse(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
     index_ready:  bool
     index_size:   int
     store_dir:    str
@@ -198,7 +202,7 @@ async def index_stats():
 
 
 @app.post("/query", tags=["RAG"])
-async def query(request: QueryRequest):
+def query(request: QueryRequest):
     """
     Run a RAG query against the job index.
 
@@ -230,7 +234,7 @@ async def query(request: QueryRequest):
 
 
 @app.post("/index", response_model=IndexResponse, tags=["Index"])
-async def build_index(request: IndexRequest):
+def build_index(request: IndexRequest):
     """
     Fetch fresh jobs from Adzuna, chunk, embed, and rebuild the vector index.
 
