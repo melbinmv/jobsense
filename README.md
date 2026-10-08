@@ -11,6 +11,8 @@ JobSense searches live job listings and uses Claude to generate grounded, honest
 - **Frontend** → [jobsense-frontend.azurewebsites.net](https://jobsense-frontend-hkbyeaewepdsc9bs.westus3-01.azurewebsites.net)
 - **API** → [jobsense-api.azurewebsites.net/docs](https://jobsense-api-ddhjhreudabcanea.westus3-01.azurewebsites.net/docs)
 
+> **Note:** The app runs on Azure's free App Service tier, which sleeps after about 20 minutes of inactivity. The first load can take up to a minute while the backend wakes up. The UI shows a "Waking up the server…" banner and unlocks the chat automatically once the API is ready.
+
 ---
 
 ## What it does
@@ -28,27 +30,45 @@ It fetches real listings, finds the most relevant ones using semantic search, an
 
 ## Architecture
 
+### Cloud architecture
+
+```mermaid
+flowchart LR
+    User([User]) --> FE["Frontend<br/>Next.js on Azure App Service"]
+    FE -->|"GET /health, POST /query"| API["API<br/>FastAPI on Azure App Service"]
+
+    API -->|"embed query"| EMB["sentence-transformers<br/>all-MiniLM-L6-v2"]
+    API -->|"load index on startup<br/>save index after /index"| BLOB[("Azure Blob Storage<br/>embeddings.npy + chunks.json")]
+    API -->|"grounded answer"| CLAUDE["Anthropic Claude API"]
+    API -->|"POST /index: fetch jobs"| ADZUNA["Adzuna Jobs API"]
 ```
-User Query (Next.js chatbot UI)
-    │
-    ▼
-FastAPI /query endpoint
-    │
-    ▼
-Embedder (all-MiniLM-L6-v2)     ← turns query into 384-dim vector
-    │
-    ▼
-Vector Store (numpy)             ← cosine similarity search
-    │
-    ▼
-Retriever                        ← deduplicates, ranks results
-    │
-    ▼
-Synthesiser (Claude)             ← generates grounded answer
-    │
-    ▼
-Answer + Sources (chatbot UI)
+
+### RAG pipeline (per query)
+
+```mermaid
+flowchart TD
+    Q["User query (Next.js chat UI)"] --> E["FastAPI /query"]
+    E --> EM["Embedder<br/>all-MiniLM-L6-v2 → 384-dim vector"]
+    EM --> VS["Vector store (NumPy)<br/>cosine similarity search"]
+    VS --> R["Retriever<br/>deduplicate by job, rank"]
+    R --> S["Synthesiser<br/>Claude generates grounded answer"]
+    S --> A["Answer + sources"]
 ```
+
+### How the index is built and persisted
+
+```mermaid
+flowchart LR
+    I["POST /index"] --> F["Fetch jobs<br/>(Adzuna)"]
+    F --> C["Chunk"]
+    C --> EM["Embed"]
+    EM --> B["Build index"]
+    B --> D["Local disk (cache)"]
+    B --> BL[("Azure Blob Storage")]
+    BL -.->|"download on startup"| M["In-memory index"]
+```
+
+The App Service disk is wiped on every restart, so Blob Storage is the permanent copy of the index. On startup the API downloads it into memory, and `/query` works immediately with no re-indexing. Without a connection string (for example in local development) it falls back to local disk only.
 
 ---
 
@@ -56,19 +76,38 @@ Answer + Sources (chatbot UI)
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 15, Tailwind CSS, TypeScript |
+| Frontend | Next.js 16, React 19, Tailwind CSS, TypeScript |
 | API | FastAPI |
 | LLM | Claude claude-sonnet-4-6 (Anthropic) |
 | Embeddings | sentence-transformers / all-MiniLM-L6-v2 |
 | Vector store | NumPy (custom, no external DB) |
+| Index persistence | Azure Blob Storage |
 | Data source | Adzuna Jobs API |
 | MLOps | MLflow |
 | Containerisation | Docker, Docker Compose |
 | CI/CD | GitHub Actions |
-| Cloud | Azure App Service, Azure Container Registry |
+| Cloud | Azure App Service, Azure Container Registry, Azure Blob Storage |
 | CLI | Python argparse |
 
 Built without LangChain or LlamaIndex — every RAG component written from scratch.
+
+### Azure services
+
+| Service | Purpose |
+|---|---|
+| App Service (×2) | Hosts the API and frontend containers |
+| Container Registry | Stores the Docker images |
+| Blob Storage | Persists the vector index across restarts |
+
+---
+
+## Design decisions
+
+- **Blob Storage for the index.** App Service containers have an ephemeral disk, so an index built on the server would vanish on every restart. The index is stored in Blob and downloaded on startup. Both files are downloaded to temporary names and swapped in together, so a failed download can never leave a mismatched pair.
+- **Flat NumPy index instead of a vector database.** At this dataset size (hundreds to a few thousand chunks), a single matrix multiply is fast enough and there is no extra service to run or pay for.
+- **Cold-start handling in the UI.** On the free tier the backend sleeps when idle. The frontend polls `/health` on load, shows a waking-up banner and only enables the chat once the API is ready.
+- **Model baked into the Docker image.** The embedding model is downloaded at build time, so a cold start doesn't need to fetch it from Hugging Face.
+- **Blocking endpoints run in a thread pool.** `/query` and `/index` are plain `def` endpoints, so a long Claude call or index build doesn't block `/health`.
 
 ---
 
@@ -82,7 +121,7 @@ jobsense/
 │   ├── pipeline/
 │   │   ├── chunker.py          # splits job descriptions into chunks
 │   │   ├── embedder.py         # sentence-transformers encoder + MLflow
-│   │   └── vector_store.py     # numpy index — build / load / search
+│   │   └── vector_store.py     # numpy index — build / load / search + Azure Blob persistence
 │   └── rag/
 │       ├── retriever.py        # embed query → search → deduplicate
 │       └── synthesiser.py      # context + Claude → grounded answer
@@ -91,7 +130,7 @@ jobsense/
 ├── frontend/                   # Next.js chatbot UI
 │   ├── Dockerfile
 │   └── app/
-│       ├── page.tsx            # chatbot interface
+│       ├── page.tsx            # chatbot interface + server wake-up check
 │       └── layout.tsx          # app shell
 ├── .github/
 │   └── workflows/
@@ -99,7 +138,7 @@ jobsense/
 ├── Dockerfile                  # API container
 ├── docker-compose.yml          # run full stack locally
 ├── pipeline.py                 # CLI entry point
-├── config.yaml                 # chunk size, model, location, top_k
+├── config.yaml                 # chunk size, model, location, top_k, blob settings
 └── pyproject.toml
 ```
 
@@ -130,6 +169,8 @@ ADZUNA_API_KEY=your_api_key
 
 - Anthropic API key → [console.anthropic.com](https://console.anthropic.com)
 - Adzuna credentials → [developer.adzuna.com](https://developer.adzuna.com) (free)
+
+Optional: add `AZURE_STORAGE_CONNECTION_STRING=...` to also persist the index to Azure Blob locally. Without it the index is stored on local disk only.
 
 ### 3. Build the index
 
@@ -178,6 +219,15 @@ docker-compose up --build
 
 ## CI/CD Pipeline
 
+```mermaid
+flowchart LR
+    DEV([git push to main]) --> LINT["Lint<br/>ruff"]
+    LINT --> BUILD["Build<br/>Docker images"]
+    BUILD --> ACR["Push to<br/>Azure Container Registry"]
+    ACR --> APIAPP["Deploy API<br/>App Service"]
+    ACR --> FEAPP["Deploy frontend<br/>App Service"]
+```
+
 Every push to `main` triggers a GitHub Actions pipeline:
 
 ```
@@ -187,9 +237,10 @@ deploy  → pushes to Azure Container Registry
         → deploys to Azure App Service
 ```
 
-Docs-only changes (README, markdown files) skip the pipeline automatically.
+Pull requests run lint and build only; deployment happens on pushes to `main`.
 
 ---
+
 
 ## CLI Usage
 
@@ -206,8 +257,8 @@ Interactive docs at **http://localhost:8000/docs**
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/health` | Liveness check + index status |
-| POST | `/index` | Fetch jobs and rebuild vector index |
+| GET | `/health` | Liveness check, index status and index source (`blob` / `disk` / `built`) |
+| POST | `/index` | Fetch jobs, rebuild the vector index and save it to Blob |
 | POST | `/query` | RAG query — returns answer + sources |
 | GET | `/index/stats` | Detailed index statistics |
 
@@ -266,12 +317,17 @@ Tracked experiments:
 Edit `config.yaml` to tune the pipeline:
 
 ```yaml
-chunk_size: 256       # words per chunk (matches model token limit)
-chunk_overlap: 32     # words shared between adjacent chunks
-model: all-MiniLM-L6-v2
-top_k: 5              # results returned per query
-location: London, UK  # default search location
+ingestion:
+  max_jobs: 500
+  location: "London, UK"
+
+pipeline:
+  chunk_size: 256          # tokens per chunk
+  chunk_overlap: 40        # token overlap between chunks
+  embedding_model: "all-MiniLM-L6-v2"
+  top_k: 5                 # chunks to retrieve per query
+
+blob:
+  container: "jobsense-index"   # Azure Blob container (created on first upload)
+  prefix: "current/"            # blob name prefix for the index files
 ```
-
----
-
