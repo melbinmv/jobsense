@@ -1,0 +1,27 @@
+name: Keep API warm
+
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:        # lets you run it manually from the Actions tab
+
+env:
+  API_URL: https://jobsense-api-ddhjhreudabcanea.westus3-01.azurewebsites.net
+
+jobs:
+  ping:
+    name: Ping /health
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Ping API
+        run: |
+          # A cold start can take a minute or more, so allow a long timeout
+          # and retry a few times before reporting failure.
+          curl --fail --silent --show-error \
+               --max-time 120 \
+               --retry 3 --retry-delay 10 --retry-all-errors \
+               "$API_URL/health"
+          echo

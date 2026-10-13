@@ -13,6 +13,7 @@ on:
       - 'README.md'
       - 'docs/**'
       - '*.md'
+      - ".github/workflows/keep-warm.yml"
 
 env:
   REGISTRY: ${{ secrets.AZURE_REGISTRY }}
