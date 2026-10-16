@@ -6,11 +6,13 @@ api/main.py
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -21,7 +23,9 @@ from src.ingestion.job_fetcher import JobFetcher
 from src.pipeline.chunker import Chunker
 from src.pipeline.embedder import Embedder
 from src.pipeline.vector_store import VectorStore
+from src.rag.live_search import LiveSearch
 from src.rag.retriever import Retriever
+from src.rag.search_planner import SearchPlanner
 from src.rag.synthesiser import Synthesiser
 
 # ---------------------------------------------------------------------------
@@ -54,6 +58,12 @@ async def lifespan(app: FastAPI):
     _state["store"]     = VectorStore()
     _state["chunker"]   = Chunker()
     _state["synth"]     = Synthesiser()
+    _state["live"]      = LiveSearch(
+        store    = _state["store"],
+        embedder = _state["embedder"],
+        chunker  = _state["chunker"],
+        planner  = SearchPlanner(),
+    )
 
     # Load index (from Azure Blob if configured, else local disk).
     # If nothing exists, the /index endpoint must be called first.
@@ -167,6 +177,29 @@ class IndexResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Admin auth (protects /index)
+# ---------------------------------------------------------------------------
+
+def require_admin_key(x_api_key: str | None = Header(default=None)) -> None:
+    """
+    Require an X-API-Key header matching the INDEX_ADMIN_KEY env var.
+
+    Fails closed: if INDEX_ADMIN_KEY is not set on the server, /index is
+    disabled rather than left open.
+    """
+    expected = os.environ.get("INDEX_ADMIN_KEY")
+    if not expected:
+        raise HTTPException(
+            status_code = 503,
+            detail      = "Indexing is disabled: INDEX_ADMIN_KEY is not configured on the server.",
+        )
+    if not x_api_key or not secrets.compare_digest(
+        x_api_key.encode(), expected.encode()
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key.")
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -209,12 +242,25 @@ def query(request: QueryRequest):
     Returns Claude's grounded answer plus the source job listings
     that were used as context.
     """
+    # 1. Fetch live listings for new topics (falls back to the existing index)
+    live: LiveSearch = _state["live"]
+    try:
+        live_info = live.ensure_coverage(request.query)
+    except Exception:
+        logger.exception("Live search step failed — continuing with existing index")
+        live_info = {"searched": False, "reason": "error"}
+
+    store: VectorStore = _state["store"]
+    if store.is_loaded and _state.get("retriever") is None:
+        _state["retriever"] = Retriever(_state["embedder"], store)
+
     retriever = _state.get("retriever")
-    if retriever is None or not _state["store"].is_loaded:
+    if retriever is None or not store.is_loaded:
         raise HTTPException(
             status_code = 503,
             detail      = (
-                "Index not ready. Call POST /index to build the job index first."
+                "No job listings are indexed yet. Ask about a role, for example "
+                "'data engineer jobs in London'."
             ),
         )
 
@@ -230,13 +276,22 @@ def query(request: QueryRequest):
         logger.exception("Synthesis failed")
         raise HTTPException(status_code=500, detail=str(exc))
 
-    return result.to_dict()
+    payload = result.to_dict()
+    payload["live_search"] = live_info
+    return payload
 
 
-@app.post("/index", response_model=IndexResponse, tags=["Index"])
+@app.post(
+    "/index",
+    response_model = IndexResponse,
+    tags           = ["Index"],
+    dependencies   = [Depends(require_admin_key)],
+)
 def build_index(request: IndexRequest):
     """
     Fetch fresh jobs from Adzuna, chunk, embed, and rebuild the vector index.
+
+    Admin-only: requires the X-API-Key header.
 
     This replaces the existing index (and the copy in Azure Blob, if
     configured). Typical run time: 2-5 minutes depending on
@@ -267,8 +322,11 @@ def build_index(request: IndexRequest):
         chunks             = embedder.embed_chunks(chunks)
 
         # 4. Build index (also uploads to Blob if configured)
+        # Hold the live-search lock so a live add can't interleave with the rebuild
         store: VectorStore = _state["store"]
-        store.build(chunks)
+        with _state["live"].lock:
+            store.build(chunks)
+            _state["live"].reset()   # topics searched earlier are no longer indexed
 
         # 5. Reload retriever with fresh index
         _state["retriever"] = Retriever(embedder, store)

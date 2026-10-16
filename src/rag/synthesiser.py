@@ -187,21 +187,24 @@ class Synthesiser:
             latency, input_tokens, output_tokens,
         )
 
-        # ── 5. MLflow ─────────────────────────────────────────────────────
+        # ── 5. MLflow (best-effort: a logging failure must never lose the answer)
         if log_to_mlflow:
-            with mlflow.start_run(run_name="synthesise"):
-                mlflow.log_params({
-                    "model":      self.model,
-                    "max_tokens": self.max_tokens,
-                    "top_k":      len(chunks),
-                })
-                mlflow.log_metrics({
-                    "input_tokens":  input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens":  input_tokens + output_tokens,
-                    "latency_secs":  round(latency, 3),
-                    "chunks_used":   len(chunks),
-                })
+            try:
+                with mlflow.start_run(run_name="synthesise"):
+                    mlflow.log_params({
+                        "model":      self.model,
+                        "max_tokens": self.max_tokens,
+                        "top_k":      len(chunks),
+                    })
+                    mlflow.log_metrics({
+                        "input_tokens":  input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens":  input_tokens + output_tokens,
+                        "latency_secs":  round(latency, 3),
+                        "chunks_used":   len(chunks),
+                    })
+            except Exception:
+                logger.exception("MLflow logging failed — answer is unaffected")
 
         return SynthesisResult(
             answer        = answer,

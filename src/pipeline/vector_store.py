@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,10 @@ def _load_config(config_path: str | Path = "config.yaml") -> dict:
 class VectorStore:
     """
     Flat numpy vector index with JSON metadata sidecar.
+
+    If AZURE_STORAGE_CONNECTION_STRING is set, the index is also persisted
+    to Azure Blob Storage so it survives container restarts.  Local disk
+    then acts as a cache.  Without the env var, behaviour is disk-only.
 
     Parameters
     ----------
@@ -85,6 +90,9 @@ class VectorStore:
         self.index_source: str    = "none"    # none | built | blob | disk
         self.blob_synced:  bool   = False
 
+        # Guards the (matrix, chunks) pair so readers never see a mismatch
+        self._swap_lock = threading.Lock()
+
         # In-memory state (populated by build() or load())
         self._matrix:  np.ndarray | None = None   # shape (N, dim)
         self._chunks:  list[Chunk]        = []
@@ -109,6 +117,12 @@ class VectorStore:
     @property
     def is_loaded(self) -> bool:
         return self._matrix is not None and len(self._chunks) > 0
+
+    def job_ids(self) -> set[str]:
+        """IDs of every job currently indexed (used to skip duplicates)."""
+        with self._swap_lock:
+            chunk_list = self._chunks
+        return {c.get("job_id") for c in chunk_list if c.get("job_id")}
 
     @property
     def blob_enabled(self) -> bool:
@@ -154,25 +168,30 @@ class VectorStore:
         t0 = time.perf_counter()
 
         # ── 1. Stack embeddings into a matrix ────────────────────────────
-        self._matrix = np.vstack(
+        matrix = np.vstack(
             [c["embedding"] for c in chunks]
         ).astype(np.float32)                        # shape (N, dim)
-        embedding_dim = self._matrix.shape[1]
+        embedding_dim = matrix.shape[1]
 
         # ── 2. Strip embeddings from metadata (they live in the .npy) ────
-        self._chunks = []
+        chunk_meta: list[Chunk] = []
         for c in chunks:
             meta = {k: v for k, v in c.items() if k != "embedding"}
             # Make metadata JSON-serialisable (drop numpy arrays, etc.)
             meta = _serialisable(meta)
-            self._chunks.append(meta)
+            chunk_meta.append(meta)
 
         elapsed = time.perf_counter() - t0
 
+        # Swap both in together so a concurrent search() sees a consistent pair
+        with self._swap_lock:
+            self._matrix = matrix
+            self._chunks = chunk_meta
+
         # ── 3. Persist ────────────────────────────────────────────────────
-        np.save(self._embeddings_path, self._matrix)
+        np.save(self._embeddings_path, matrix)
         with open(self._chunks_path, "w") as fh:
-            json.dump(self._chunks, fh, indent=2)
+            json.dump(chunk_meta, fh, indent=2)
 
         logger.info(
             "Index built  %d chunks  dim=%d  %.2fs  → %s",
@@ -193,16 +212,19 @@ class VectorStore:
                 )
 
         # ── 4. MLflow ─────────────────────────────────────────────────────
-        with mlflow.start_run(run_name=run_name):
-            mlflow.log_params({
-                "embedding_dim": embedding_dim,
-                "store_dir":     str(self.store_dir),
-            })
-            mlflow.log_metrics({
-                "num_chunks":   self.size,
-                "build_seconds": round(elapsed, 3),
-            })
-        logger.info("MLflow run logged to experiment: %s", self._mlflow_experiment)
+        try:
+            with mlflow.start_run(run_name=run_name):
+                mlflow.log_params({
+                    "embedding_dim": embedding_dim,
+                    "store_dir":     str(self.store_dir),
+                })
+                mlflow.log_metrics({
+                    "num_chunks":   self.size,
+                    "build_seconds": round(elapsed, 3),
+                })
+            logger.info("MLflow run logged to experiment: %s", self._mlflow_experiment)
+        except Exception:
+            logger.exception("MLflow logging failed — index build is unaffected")
 
         # ── 5. DVC (optional) ─────────────────────────────────────────────
         if dvc_track:
@@ -274,7 +296,9 @@ class VectorStore:
             Sorted best-first.  Each chunk has a "score" key (float,
             0–1) added — this is the cosine similarity.
         """
-        if not self.is_loaded:
+        with self._swap_lock:
+            matrix, chunk_list = self._matrix, self._chunks
+        if matrix is None or not chunk_list:
             raise RuntimeError(
                 "Index not loaded. Call load() before search(), or build() "
                 "to create a new index."
@@ -284,10 +308,10 @@ class VectorStore:
 
         # Dot product = cosine similarity (vectors are L2-normalised)
         # matrix @ query_vec → shape (N,)  — one score per chunk
-        scores: np.ndarray = self._matrix @ query_vec.astype(np.float32)
+        scores: np.ndarray = matrix @ query_vec.astype(np.float32)
 
         # Top-k indices, best first
-        if k >= self.size:
+        if k >= len(chunk_list):
             top_indices = np.argsort(scores)[::-1]
         else:
             # argpartition is O(N) vs O(N log N) for full sort
@@ -296,7 +320,7 @@ class VectorStore:
 
         results: list[Chunk] = []
         for idx in top_indices:
-            chunk = dict(self._chunks[idx])       # shallow copy
+            chunk = dict(chunk_list[idx])         # shallow copy
             chunk["score"] = float(scores[idx])
             results.append(chunk)
 
