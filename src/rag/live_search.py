@@ -1,5 +1,6 @@
 """
 src/rag/live_search.py
+~~~~~~~~~~~~~~~~~~~~~~~
 """
 
 from __future__ import annotations
@@ -9,7 +10,8 @@ import re
 import threading
 import time
 from collections import deque
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from src.rag.search_planner import SearchPlan, SearchPlanner
 
