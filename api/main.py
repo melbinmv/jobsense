@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Allow imports from project root when running as a module
@@ -26,6 +27,7 @@ from src.pipeline.vector_store import VectorStore
 from src.rag.live_search import LiveSearch
 from src.rag.retriever import Retriever
 from src.rag.search_planner import SearchPlanner
+from src.rag.streaming import stream_query
 from src.rag.synthesiser import Synthesiser
 
 # ---------------------------------------------------------------------------
@@ -199,6 +201,15 @@ def require_admin_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key.")
 
 
+def _get_retriever():
+    """Return a ready Retriever, creating it once an index exists; else None."""
+    store: VectorStore = _state["store"]
+    if store.is_loaded and _state.get("retriever") is None:
+        _state["retriever"] = Retriever(_state["embedder"], store)
+    retriever = _state.get("retriever")
+    return retriever if (retriever is not None and store.is_loaded) else None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -279,6 +290,32 @@ def query(request: QueryRequest):
     payload = result.to_dict()
     payload["live_search"] = live_info
     return payload
+
+
+@app.post("/query/stream", tags=["RAG"])
+def query_stream(request: QueryRequest):
+    """
+    Same pipeline as /query, but streamed as Server-Sent Events so the
+    answer appears word by word.
+
+    Events: status (only when live listings are being fetched), sources,
+    token (many), done, error.
+    """
+    return StreamingResponse(
+        stream_query(
+            query         = request.query,
+            top_k         = request.top_k,
+            live          = _state["live"],
+            get_retriever = _get_retriever,
+            synth         = _state["synth"],
+        ),
+        media_type = "text/event-stream",
+        headers    = {
+            "Cache-Control":     "no-cache, no-transform",
+            "X-Accel-Buffering": "no",     # ask proxies not to buffer the stream
+            "Connection":        "keep-alive",
+        },
+    )
 
 
 @app.post(

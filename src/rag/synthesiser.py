@@ -10,6 +10,7 @@ import dataclasses
 import logging
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,27 @@ overload. Aim for 150-250 words unless the query demands more detail.\
 
 
 # ---------------------------------------------------------------------------
+# Sources payload (shared by the JSON and streaming responses)
+# ---------------------------------------------------------------------------
+
+def sources_payload(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """JSON-serialisable source list for the retrieved chunks."""
+    return [
+        {
+            "rank":    i + 1,
+            "job_id":  c.get("job_id",  ""),
+            "title":   c.get("title",   ""),
+            "company": c.get("company", ""),
+            "location":c.get("location",""),
+            "salary":  c.get("salary",  ""),
+            "url":     c.get("url",     ""),
+            "score":   round(c.get("score", 0.0), 4),
+        }
+        for i, c in enumerate(chunks)
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
 
@@ -73,19 +95,7 @@ class SynthesisResult:
             "input_tokens":  self.input_tokens,
             "output_tokens": self.output_tokens,
             "latency_secs":  round(self.latency_secs, 3),
-            "sources": [
-                {
-                    "rank":    i + 1,
-                    "job_id":  c.get("job_id",  ""),
-                    "title":   c.get("title",   ""),
-                    "company": c.get("company", ""),
-                    "location":c.get("location",""),
-                    "salary":  c.get("salary",  ""),
-                    "url":     c.get("url",     ""),
-                    "score":   round(c.get("score", 0.0), 4),
-                }
-                for i, c in enumerate(self.chunks_used)
-            ],
+            "sources": sources_payload(self.chunks_used),
         }
 
 
@@ -251,6 +261,77 @@ class Synthesiser:
             output_tokens = response.usage.output_tokens,
             latency_secs  = latency,
         )
+
+
+    # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
+    def stream_from_context(
+        self,
+        query:         str,
+        context_str:   str,
+        chunks:        list[dict[str, Any]],
+        log_to_mlflow: bool = True,
+    ) -> Iterator[dict[str, Any]]:
+        """
+        Stream Claude's answer for a pre-built context.
+
+        Yields ``{"type": "token", "text": ...}`` many times, then one
+        ``{"type": "done", ...}`` with token counts and latency.  If the
+        caller stops iterating early (client disconnected), the Claude
+        request is closed and nothing is logged.
+        """
+        user_prompt = _build_user_prompt(query, context_str)
+
+        logger.info(
+            "Streaming from Claude  model=%s  chunks=%d  query=%r",
+            self.model, len(chunks), query[:60],
+        )
+        t0 = time.perf_counter()
+        with self._client.messages.stream(
+            model      = self.model,
+            max_tokens = self.max_tokens,
+            system     = _SYSTEM_PROMPT,
+            messages   = [{"role": "user", "content": user_prompt}],
+        ) as stream:
+            for text in stream.text_stream:
+                yield {"type": "token", "text": text}
+            final = stream.get_final_message()
+        latency = time.perf_counter() - t0
+
+        input_tokens  = final.usage.input_tokens
+        output_tokens = final.usage.output_tokens
+        logger.info(
+            "Claude stream finished  %.2fs  in=%d  out=%d  tokens",
+            latency, input_tokens, output_tokens,
+        )
+
+        if log_to_mlflow:
+            try:
+                with mlflow.start_run(run_name="synthesise_stream"):
+                    mlflow.log_params({
+                        "model":      self.model,
+                        "max_tokens": self.max_tokens,
+                        "top_k":      len(chunks),
+                    })
+                    mlflow.log_metrics({
+                        "input_tokens":  input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens":  input_tokens + output_tokens,
+                        "latency_secs":  round(latency, 3),
+                        "chunks_used":   len(chunks),
+                    })
+            except Exception:
+                logger.exception("MLflow logging failed — answer is unaffected")
+
+        yield {
+            "type":          "done",
+            "model":         self.model,
+            "input_tokens":  input_tokens,
+            "output_tokens": output_tokens,
+            "latency_secs":  round(latency, 3),
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -42,10 +42,10 @@ class LiveSearch:
         chunker,
         planner:        SearchPlanner,
         *,
-        max_jobs:       int   = MAX_JOBS_PER_SEARCH,
+        max_jobs:        int   = MAX_JOBS_PER_SEARCH,
         freshness_hours: float = FRESHNESS_HOURS,
-        max_per_hour:   int   = MAX_SEARCHES_HOUR,
-        max_per_day:    int   = MAX_SEARCHES_DAY,
+        max_per_hour:    int   = MAX_SEARCHES_HOUR,
+        max_per_day:     int   = MAX_SEARCHES_DAY,
         fetcher_factory: Callable[[], Any] | None = None,
     ):
         self.store    = store
@@ -61,7 +61,7 @@ class LiveSearch:
         self._fetcher_factory = fetcher_factory
         self._fetcher         = None
 
-        self._searched: dict[str, float] = {}     # key → time last fetched
+        self._searched: dict[str, float] = {}       # key → time last fetched
         self._attempts: deque[float]     = deque()  # times of Adzuna attempts
 
         # Serialises live searches (and /index) so the index has one writer
@@ -86,25 +86,32 @@ class LiveSearch:
         ts = self._searched.get(key)
         return ts is not None and (time.time() - ts) < self.freshness_secs
 
-    def _allow_attempt(self) -> bool:
-        """Rolling hourly/daily caps. Records the attempt if allowed."""
+    def _cap_available(self) -> bool:
+        """True if the rolling hourly/daily caps allow another attempt."""
         now = time.time()
         while self._attempts and now - self._attempts[0] > 86400:
             self._attempts.popleft()
         last_hour = sum(1 for t in self._attempts if now - t <= 3600)
-        if last_hour >= self.max_per_hour or len(self._attempts) >= self.max_per_day:
+        return last_hour < self.max_per_hour and len(self._attempts) < self.max_per_day
+
+    def _allow_attempt(self) -> bool:
+        """Like _cap_available(), but records the attempt when allowed."""
+        if not self._cap_available():
             return False
-        self._attempts.append(now)
+        self._attempts.append(time.time())
         return True
 
     # ------------------------------------------------------------------
+    # Step 1: cheap decision
+    # ------------------------------------------------------------------
 
-    def ensure_coverage(self, query: str) -> LiveInfo:
+    def plan_coverage(self, query: str) -> tuple[LiveInfo, SearchPlan | None]:
         """
-        Make sure the index has listings relevant to *query*.
+        Plan the search and decide whether a live fetch is needed.
 
-        Returns a small dict for the API response / logs:
-        {searched, keywords, location, new_jobs, reason}
+        Returns (info, plan).  *plan* is None when no fetch will happen
+        (not a job question, searched recently, capped, planner failed with a
+        usable index); otherwise pass both values to run_fetch().
         """
         plan = self.planner.plan(query)
         info: LiveInfo = {
@@ -118,18 +125,31 @@ class LiveSearch:
         if plan.failed:
             if self.store.is_loaded:
                 info["reason"] = "planner_failed_used_existing_index"
-                return info
+                return info, None
             plan = SearchPlan(keywords=_fallback_keywords(query), location=None)
             info["keywords"] = plan.keywords
         elif plan.keywords is None:
             info["reason"] = "not_a_job_search"
-            return info
+            return info, None
 
-        key = plan.key
-        if self._is_fresh(key):
+        if self._is_fresh(plan.key):
             info["reason"] = "recently_searched"
-            return info
+            return info, None
 
+        if not self._cap_available():
+            logger.warning("Live search cap reached — using existing index")
+            info["reason"] = "rate_limited"
+            return info, None
+
+        return info, plan
+
+    # ------------------------------------------------------------------
+    # Step 2: slow fetch
+    # ------------------------------------------------------------------
+
+    def run_fetch(self, plan: SearchPlan, info: LiveInfo) -> LiveInfo:
+        """Fetch, embed and index listings for *plan*. Never raises."""
+        key = plan.key
         with self.lock:
             # Another request may have fetched this topic while we waited
             if self._is_fresh(key):
@@ -146,8 +166,19 @@ class LiveSearch:
             except Exception:
                 logger.exception("Live search failed — using existing index")
                 info["reason"] = "error"
-
         return info
+
+    def ensure_coverage(self, query: str) -> LiveInfo:
+        """
+        Make sure the index has listings relevant to *query*.
+
+        Returns a small dict for the API response / logs:
+        {searched, keywords, location, new_jobs, reason}
+        """
+        info, plan = self.plan_coverage(query)
+        if plan is None:
+            return info
+        return self.run_fetch(plan, info)
 
     # ------------------------------------------------------------------
 

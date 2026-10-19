@@ -9,8 +9,10 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const HEALTH_RETRY_MS = 3000;
 // Per-attempt timeout for /health (a cold container can hang the request)
 const HEALTH_TIMEOUT_MS = 15000;
-// Max time to wait for a /query answer
+// Max time to wait for the server to start answering a query
 const QUERY_TIMEOUT_MS = 90000;
+// Max silence allowed between pieces of a streamed answer
+const STREAM_IDLE_MS = 60000;
 
 type ApiStatus = "waking" | "ready" | "noindex";
 
@@ -30,6 +32,12 @@ type Message = {
   content: string;
   sources?: Source[];
   loading?: boolean;
+  status?: string; // e.g. "Searching live listings…" while waiting
+};
+
+type StreamEvent = {
+  event: string;
+  data: Record<string, unknown>;
 };
 
 async function fetchWithTimeout(
@@ -43,6 +51,71 @@ async function fetchWithTimeout(
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// Read one chunk from a stream, failing with an AbortError if it goes quiet.
+async function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new DOMException("Stream went quiet", "AbortError")),
+      timeoutMs
+    );
+  });
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Parse a Server-Sent Events response into { event, data } objects.
+async function* readEvents(
+  res: Response,
+  idleMs: number
+): AsyncGenerator<StreamEvent> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const chunk = await readWithTimeout(reader, idleMs);
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+
+        let event = "message";
+        const dataLines: string[] = [];
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (dataLines.length > 0) {
+          yield { event, data: JSON.parse(dataLines.join("\n")) };
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+}
+
+async function errorFromResponse(res: Response): Promise<Error> {
+  try {
+    const err = await res.json();
+    return new Error(err.detail || "Something went wrong");
+  } catch {
+    // Non-JSON error body (e.g. a gateway error page)
+    return new Error(`The server returned an error (${res.status}).`);
   }
 }
 
@@ -130,7 +203,12 @@ function ChatMessage({ message }: { message: Message }) {
         </div>
         <div className="px-4 py-3 rounded-2xl rounded-tl-sm bg-[#161b22] border border-[#2a3a5c] text-[#e6edf3] text-sm leading-relaxed">
           {message.loading ? (
-            <ThinkingDots />
+            <div>
+              <ThinkingDots />
+              {message.status && (
+                <p className="text-xs text-[#8b949e] mt-1">{message.status}</p>
+              )}
+            </div>
           ) : (
             <>
               <div className="prose prose-invert prose-sm max-w-none
@@ -232,9 +310,12 @@ export default function Home() {
 
   const isReady = apiStatus === "ready";
 
+  // Jump (don't glide) while an answer is streaming in, so it doesn't jitter
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    bottomRef.current?.scrollIntoView({
+      behavior: isLoading ? "auto" : "smooth",
+    });
+  }, [messages, isLoading]);
 
   // Wake-up check: poll /health until the API answers.
   // Re-runs whenever apiStatus goes back to "waking" (e.g. after a failed query).
@@ -281,6 +362,66 @@ export default function Home() {
     textareaRef.current?.focus();
   };
 
+  const patchMessage = (id: string, update: (m: Message) => Message) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? update(m) : m)));
+  };
+
+  // Non-streaming fallback, used if /query/stream isn't available
+  const answerWithoutStreaming = async (id: string, query: string) => {
+    const res = await fetchWithTimeout(
+      `${API_URL}/query`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      },
+      QUERY_TIMEOUT_MS
+    );
+    if (!res.ok) throw await errorFromResponse(res);
+    const data = await res.json();
+    patchMessage(id, (m) => ({
+      ...m,
+      content: data.answer,
+      sources: data.sources,
+      loading: false,
+      status: undefined,
+    }));
+  };
+
+  // Read the SSE stream and fill the message in as pieces arrive
+  const consumeStream = async (id: string, res: Response) => {
+    let text = "";
+    let finished = false;
+
+    for await (const { event, data } of readEvents(res, STREAM_IDLE_MS)) {
+      if (event === "status") {
+        const message = String(data.message ?? "");
+        patchMessage(id, (m) => ({ ...m, status: message }));
+      } else if (event === "sources") {
+        const sources = (data.sources ?? []) as Source[];
+        patchMessage(id, (m) => ({ ...m, sources }));
+      } else if (event === "token") {
+        text += String(data.text ?? "");
+        const snapshot = text;
+        patchMessage(id, (m) => ({
+          ...m,
+          content: snapshot,
+          loading: false,
+          status: undefined,
+        }));
+      } else if (event === "error") {
+        throw new Error(String(data.detail ?? "Something went wrong"));
+      } else if (event === "done") {
+        finished = true;
+      }
+    }
+
+    if (!finished && !text) {
+      throw new Error("The answer ended unexpectedly. Please try again.");
+    }
+    patchMessage(id, (m) => ({ ...m, loading: false, status: undefined }));
+  };
+
   const handleSubmit = async () => {
     const query = input.trim();
     if (!query || isLoading || !isReady) return;
@@ -308,7 +449,7 @@ export default function Home() {
 
     try {
       const res = await fetchWithTimeout(
-        `${API_URL}/query`,
+        `${API_URL}/query/stream`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -317,32 +458,14 @@ export default function Home() {
         QUERY_TIMEOUT_MS
       );
 
-      if (!res.ok) {
-        let detail = "Something went wrong";
-        try {
-          const err = await res.json();
-          detail = err.detail || detail;
-        } catch {
-          // Non-JSON error body (e.g. a gateway error page)
-          detail = `The server returned an error (${res.status}).`;
-        }
-        throw new Error(detail);
+      if (res.status === 404 || res.status === 405 || !res.body) {
+        // Older backend without streaming: use the plain endpoint
+        await answerWithoutStreaming(loadingMsg.id, query);
+      } else if (!res.ok) {
+        throw await errorFromResponse(res);
+      } else {
+        await consumeStream(loadingMsg.id, res);
       }
-
-      const data = await res.json();
-
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === loadingMsg.id
-            ? {
-                ...m,
-                content: data.answer,
-                sources: data.sources,
-                loading: false,
-              }
-            : m
-        )
-      );
     } catch (err: unknown) {
       let message: string;
 
@@ -352,7 +475,7 @@ export default function Home() {
         setWaitedSecs(0);
         setApiStatus("waking");
       } else if (err instanceof TypeError) {
-        // fetch() itself failed: server unreachable or asleep
+        // fetch() or the stream failed: server unreachable or asleep
         message =
           "Lost connection to the server. It may have gone to sleep, so I'm reconnecting. Try again in a moment.";
         setWaitedSecs(0);
@@ -363,13 +486,13 @@ export default function Home() {
         message = "Failed to reach the JobSense API.";
       }
 
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === loadingMsg.id
-            ? { ...m, content: message, loading: false }
-            : m
-        )
-      );
+      // Keep any partial answer, and add the problem underneath it
+      patchMessage(loadingMsg.id, (m) => ({
+        ...m,
+        content: m.content ? `${m.content}\n\n_${message}_` : message,
+        loading: false,
+        status: undefined,
+      }));
     } finally {
       setIsLoading(false);
     }
