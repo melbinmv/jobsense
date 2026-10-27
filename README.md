@@ -4,16 +4,19 @@
 
 JobSense answers questions about the UK job market using live listings. JobSense searches live job listings and uses Claude to generate grounded, honest career insights. Every answer is backed by real job data fetched from the Adzuna API.
 
-
+> **⚠️ The live Azure deployment has been taken down.** It ran on an Azure free-trial account that has now expired, so the old `azurewebsites.net` links no longer work. **Watch the demo video below to see the app in action.** A new hosted version will be linked here once it's available.
 
 ---
 
-## Live Demo
+## Demo
 
-- **Frontend** → [jobsense-frontend.azurewebsites.net](https://jobsense-frontend-hkbyeaewepdsc9bs.westus3-01.azurewebsites.net)
-- **API** → [jobsense-api.azurewebsites.net/docs](https://jobsense-api-ddhjhreudabcanea.westus3-01.azurewebsites.net/docs)
+[![Watch the JobSense demo on YouTube](https://img.youtube.com/vi/ke1LDtCpW8I/hqdefault.jpg)](https://youtu.be/ke1LDtCpW8I)
 
-> **Note:** The app runs on Azure's free App Service tier, which sleeps after about 20 minutes of inactivity. The first load can take up to a minute while the backend wakes up. The UI shows a "Waking up the server…" banner and unlocks the chat automatically once the API is ready. The first question on a new topic also takes a few extra seconds, because it fetches and indexes live listings.
+▶️ **[Watch the demo on YouTube](https://youtu.be/ke1LDtCpW8I)**
+
+The video shows the chat answering a question from the live index, fetching fresh listings for a new topic ("Searching live listings…"), the answer streaming in word by word, and the sources behind each answer.
+
+You can also run it yourself in a few minutes. See [Quickstart](#quickstart).
 
 ---
 
@@ -133,11 +136,12 @@ The index isn't limited to a fixed set of roles. It grows as people ask question
 - **Blob Storage for the index.** App Service containers have an ephemeral disk, so an index built on the server would vanish on every restart. The index is stored in Blob and downloaded on startup. Both files are downloaded to temporary names and swapped in together, so a failed download can never leave a mismatched pair.
 - **Safe concurrent updates.** Live searches run one at a time behind a lock, and the in-memory matrix and metadata are swapped in together, so a query never reads a half-updated index.
 - **Flat NumPy index instead of a vector database.** At this dataset size (hundreds to a few thousand chunks), a single matrix multiply is fast enough, and there is no extra service to run or pay for.
+- **Streamed answers.** `/query/stream` sends the answer as Server-Sent Events (`status`, `sources`, `token`, `done`), so the first words appear in about a second instead of after the full 3 to 8 second Claude call. While a new topic is being fetched, the chat shows "Searching live listings…". The frontend falls back to the plain `/query` endpoint if streaming isn't available.
 - **Cold-start handling in the UI.** On the free tier the backend sleeps when idle. The frontend polls `/health` on load, shows a waking-up banner, and only enables the chat once the API is ready.
 - **Model baked into the Docker image.** The embedding model is downloaded at build time, so a cold start doesn't need to fetch it from Hugging Face.
 - **Blocking endpoints run in a thread pool.** `/query` and `/index` are plain `def` endpoints, so a long Claude call or index build doesn't block `/health`.
 - **MLflow is best-effort.** A failed experiment-tracking write is logged and never loses an answer or breaks an index build.
-
+- **Admin-only indexing.** `POST /index` requires an `X-API-Key` header, so strangers can't rebuild the index or use up the Adzuna quota.
 
 ---
 
@@ -155,6 +159,7 @@ jobsense/
 │   └── rag/
 │       ├── search_planner.py   # question → job keywords + location (Claude Haiku)
 │       ├── live_search.py      # fetch → dedupe → embed → add, with caps and freshness
+│       ├── streaming.py        # builds the Server-Sent Events stream for /query/stream
 │       ├── retriever.py        # embed query → search → deduplicate
 │       └── synthesiser.py      # context + Claude → grounded answer
 ├── api/
@@ -324,6 +329,7 @@ Interactive docs at **http://localhost:8000/docs**
 | GET | `/health` | Liveness check, index status and index source (`blob` / `disk` / `built`) |
 | POST | `/index` | Admin only (`X-API-Key`). Fetch jobs, rebuild the whole vector index and save it to Blob |
 | POST | `/query` | RAG query. Fetches live listings for new topics, then returns the answer and sources |
+| POST | `/query/stream` | Same pipeline, streamed as Server-Sent Events so the answer appears word by word |
 | GET | `/index/stats` | Detailed index statistics |
 
 ### Example
